@@ -1,4 +1,3 @@
-
 const yaml = require("js-yaml");
 const express = require("express");
 const { pipeline } = require("stream/promises");
@@ -168,19 +167,28 @@ const check_mkdir = (path) =>
 const parse_client_range = (v) =>
 {
 	let params = new URLSearchParams(v);
+	let bytes = params.get("bytes");
+
+	if(!bytes) return {
+		start: 0,
+		end: Infinity,
+	};
+	
 	let [start, end] = params.get("bytes").split("-");
 
+	start = parseInt(start);
+	end = parseInt(end);
+
 	return {
-		start: parseInt(start) || 0,
-		end: parseInt(end) ?? Infinity
+		start: start || 0,
+		end: isNaN(end) ? Infinity : end,
 	};
 }
 
-const send_file_download = async (name, vars, item, is_sig, is_partial, req, res) =>
+const send_file_download = async (name, vars, item, is_sig, fs_mode, rs, res) =>
 {
 	const path = "db/" + name + "/" + vars + "/" + item.name;
 	const fn = is_sig ? "/sig" : "/blob";
-	const fs_mode = !is_partial;
 	
 	let file;
 	
@@ -192,11 +200,13 @@ const send_file_download = async (name, vars, item, is_sig, is_partial, req, res
 		fs.writeFileSync(path + fn + ".version", item.pkginfo["%VERSION%"]);
 		file = fs.createWriteStream(path + fn);
 	}
-	
-	for await (const chunk of req.body)
+
+	for await (const chunk of rs)
 	{
 		if(!res.writable)
 		{
+			rs.destroy();
+
 			if(!fs_mode) return;
 
 			file.end();
@@ -206,13 +216,17 @@ const send_file_download = async (name, vars, item, is_sig, is_partial, req, res
 		}
 		
 		if(fs_mode)
-		file.write(chunk);
+		{
+			file.write(chunk);
+		}
 
 		res.write(chunk);
 	}
 
 	if(fs_mode)
-	file.end();
+	{
+		file.end();
+	}
 
 	res.send();
 }
@@ -290,10 +304,22 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 			let pack = tar.pack();
 
 			res.header("Content-Type", "application/x-tar");
-			pack.pipe(res);
 
+			pack.on("data", (chunk) =>
+			{
+				if(res.writable)
+				res.write(chunk);
+
+				else
+				pack.destroy();
+			});
+
+			pack.on("end", () =>
+			{
+				res.send();
+			});
+			
 			await create_db(db, pack);
-
 			pack.finalize();
 
 			return;
@@ -311,25 +337,29 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 		const fs_fn = is_sig ? "/sig" : "/blob";
 
 		let rs;
+		let fs_mode;
 		
-		if(fs.existsSync(fs_path + fs_fn) && fs.existsSync(fs_path + fs_fn + ".version") && fs.readFileSync(fs_path + fs_fn + ".version") === item.pkginfo["%VERSION%"])
+		if(fs.existsSync(fs_path + fs_fn) && fs.existsSync(fs_path + fs_fn + ".version") && fs.readFileSync(fs_path + fs_fn + ".version").toString() === item.pkginfo["%VERSION%"])
 		{
-			let config = get_start_end(req.headers.range);
-			rs = fs.createReadStream(fs_path + fs_fn, config);
-
+			let config = parse_client_range(req.headers.range);
+			let stat = fs.statSync(fs_path + fs_fn);
 			let start = config.start;
 			let end = config.end;
 
-			if(start > stat.size) start = stat.size;
-			if(end > stat.size) start = stat.size;
-			if(start !== 0 || end >= stat.size) res.status(206);
+			if(start > stat.size - 1) start = stat.size - 1;
+			if(end > stat.size - 1) end = stat.size - 1;
+			if(start !== 0 || end < stat.size) res.status(206);
 
-			console.log("HIT /" + name + req.path);
+			fs_mode = false;
+			rs = fs.createReadStream(fs_path + fs_fn, config);
+			console.log("HIT /" + name + "/" + path.join("/"));
 
 			res.header("Accept-Ranges", "bytes");
-			res.header("Content-Length", stat.size);
-			res.header("Content-Range", "bytes " + start + "-" + end + "/" + stat.size);
+			res.header("Content-Length", end - start + 1);
 			res.header("Content-Type", "application/octet-stream");
+
+			if(is_partial) 
+			res.header("Content-Range", "bytes " + start + "-" + end + "/" + stat.size);
 		}
 
 		else
@@ -340,17 +370,19 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 				},
 			});
 			
-			console.log("MISS " + item.mirror + name + req.path);
+			console.log("MISS " + item.mirror + path.join("/"));
 
 			res.status(file_req.status);
 			res.header("Accept-Ranges", file_req.headers.get("Accept-Ranges"));
 			res.header("Content-Length", file_req.headers.get("Content-Length"));
-			res.header("Content-Range", file_req.headers.get("Content-Range"));
 			res.header("Content-Type", file_req.headers.get("Content-Type"));
-			rs = file_req;
+			res.header("Content-Range", file_req.headers.get("Content-Range"));
+
+			fs_mode = !is_partial;
+			rs = file_req.body;
 		}
 
-		await send_file_download(name, vars, item, is_sig, is_partial, rs, res);
+		await send_file_download(name, vars, item, is_sig, fs_mode, rs, res);
 	});
 };
 
