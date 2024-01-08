@@ -1,0 +1,13 @@
+
+port: 8080
+repos:
+  archlinux:
+    path: $repo/os/$arch
+    entrypoint: $repo.db
+    mirrors: default
+mirrors:
+  default:
+    - http://ftp.swin.edu.au/$name/
+    - http://mirror.internode.on.net/pub/$name/
+    - http://ftp.iinet.net.au/pub/$name/
+
