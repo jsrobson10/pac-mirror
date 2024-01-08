@@ -324,6 +324,8 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 			if(end > stat.size) start = stat.size;
 			if(start !== 0 || end >= stat.size) res.status(206);
 
+			console.log("HIT /" + name + req.path);
+
 			res.header("Accept-Ranges", "bytes");
 			res.header("Content-Length", stat.size);
 			res.header("Content-Range", "bytes " + start + "-" + end + "/" + stat.size);
@@ -337,6 +339,8 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 					range: req.headers.range,
 				},
 			});
+			
+			console.log("MISS " + item.mirror + name + req.path);
 
 			res.status(file_req.status);
 			res.header("Accept-Ranges", file_req.headers.get("Accept-Ranges"));
