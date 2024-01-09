@@ -390,7 +390,7 @@ const display_db = async (res, db, path, entrypoint, name, vars) =>
 <tr>
 	<td><a href="/` + sanitize(name + "/" + path.join("/") + "/" + pkgname) + `">` + sanitize(pkgname) + `</a></td>
 	<td>` + sanitize(data.state) + `</td>
-	<td><a href="` + sanitize(data.mirror + path.join("/")) + `" target="_blank">` + sanitize(data.mirror) + `</a></td>
+	<td><a href="` + sanitize(data.mirror + path.join("/")) + `" target="_blank">` + sanitize(data.mirror + path.join("/")) + `</a></td>
 </tr>
 `);
 	}
