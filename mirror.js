@@ -1,9 +1,11 @@
 const yaml = require("js-yaml");
 const express = require("express");
+const sanitize = require("htmlspecialchars");
 const { pipeline } = require("stream/promises");
 const gunzip = require("gunzip-maybe");
 const stream = require("stream");
 const tar = require("tar-stream");
+const fs_p = require("fs/promises");
 const fs = require("fs");
 
 const app = express();
@@ -38,7 +40,7 @@ const process_pkginfo = (lines) =>
 	}
 
 	return pkginfo;
-};
+}
 
 const process_tar_chunk = (header, stream, next) => new Promise((res, rej) =>
 {
@@ -95,19 +97,84 @@ const read_db = async (name, path, mirror, pkgs_db) =>
 	});
 	
 	await pipeline(req.body, gunzip(), extract);
-};
+}
 
-const read_dbs = async (name, path, mirrors) =>
+const get_pkgname = async (fn, db) =>
+{
+	for(const record of Object.values(db))
+	{
+		if(fn.startsWith(record.name))
+		{
+			return record.name;
+		}
+	}
+}
+
+const cleanup_db_pkg = async (files, pkgs, path) =>
+{
+	const keep = config.keep ?? 2;
+
+	for(let i = keep; i < pkgs.length; i++)
+	{
+		const path_rm = path + "/" + pkgs[0];
+		
+		console.log("DELETE " + path_rm);
+
+		delete files[pkgs[0]];
+		await fs_p.rm(path + "/" + pkgs[0]);
+	}
+}
+
+const cleanup_dbs = async (meta, db, name, vars) =>
+{
+	const path = "db/" + name + "/" + vars;
+	const cmp = (a, b) => a[1] - b[1];
+
+	for(const [pkgid, files] of Object.entries(meta))
+	{
+		let pkgs_sig = [];
+		let pkgs_blob = [];
+
+		for(let pkg of Object.entries(files))
+		{
+			if(pkg[0].endsWith(".sig")) pkgs_sig.push(pkg);
+			else pkgs_blob.push(pkg);
+		}
+
+		pkgs_sig.sort(cmp);
+		pkgs_blob.sort(cmp);
+
+		const pkgpath = path + "/" + pkgid;
+		await cleanup_db_pkg(files, pkgs_sig, pkgpath);
+		await cleanup_db_pkg(files, pkgs_blob, pkgpath);
+	}
+
+	if(Object.keys(meta).length > 0 || fs.existsSync(path))
+	{
+		fs.writeFileSync(path + "/meta.json", JSON.stringify(meta));
+	}
+}
+
+const read_dbs = async (dbs, meta, name, vars, path, mirrors, register=true) =>
 {
 	let pkgs_db = {};
 	let promises = [];
+	let failed = 0;
 
 	for(let i = 0; i < mirrors.length; i++)
 	{
-		promises.push(read_db(name, path, mirrors[i], pkgs_db));
+		promises.push(read_db(name, path, mirrors[i], pkgs_db).catch((e) => {
+			console.log("ERROR " + mirrors[i], e);
+			failed++;
+		}));
 	}
 
 	await Promise.all(promises);
+
+	if(failed === promises.length)
+	{
+		return null;
+	}
 
 	let pkgs_db_fn = {};
 	
@@ -116,8 +183,20 @@ const read_dbs = async (name, path, mirrors) =>
 		pkgs_db_fn[item.filename] = item;
 	}
 
+	if(register)
+	{
+		setInterval(async () =>
+		{
+			console.log("REFRESH " + name + "?" + vars);
+
+			dbs[vars] = read_dbs(dbs, meta, name, vars, path, mirrors, false);
+
+		}, (config.repos[name].refresh ?? 3600) * 1000);
+	}
+
+	await cleanup_dbs(meta, pkgs_db, name, vars);
 	return pkgs_db_fn;
-};
+}
 
 const create_db = async (pkgs_db, pack) =>
 {
@@ -134,23 +213,27 @@ const create_db = async (pkgs_db, pack) =>
 
 		pack.entry({name: item.tarfn}, entry_data.join("\n"));
 	}
-};
+}
 
-const get_dbs = async (dbs, vars, name, path, mirrors) =>
+const get_dbs = async (dbs, all_meta, vars, name, path, mirrors) =>
 {
+	const db_path = "db/" + name + "/" + vars;
+	
 	if(!dbs[vars])
 	{
-		console.log("added " + name + ":" + vars + " to be updated and downloaded");
+		console.log("ADD " + name + "?" + vars);
 
-		dbs[vars] = read_dbs(name, path, mirrors);
-
-		setInterval(async () =>
+		if(fs.existsSync(db_path) && fs.existsSync(db_path + "/meta.json"))
 		{
-			console.log("redownloading " + name + ":" + vars);
+			all_meta[vars] = JSON.parse(fs.readFileSync(db_path + "/meta.json"));
+		}
 
-			dbs[vars] = read_dbs(name, path, mirrors);
+		else
+		{
+			all_meta[vars] = {};
+		}
 
-		}, (config.repos[name].refresh ?? 3600) * 1000);
+		dbs[vars] = read_dbs(dbs, all_meta[vars], name, vars, path, mirrors);
 	}
 
 	return await dbs[vars];
@@ -185,20 +268,24 @@ const parse_client_range = (v) =>
 	};
 }
 
-const send_file_download = async (name, vars, item, is_sig, fs_mode, rs, res) =>
+const send_file_download = async (meta, item, name, vars, fs_path, fs_mode, rs, res) =>
 {
-	const path = "db/" + name + "/" + vars + "/" + item.name;
-	const fn = is_sig ? "/sig" : "/blob";
-	
 	let file;
 	
 	if(fs_mode)
 	{
 		check_mkdir("db/" + name + "/" + vars);
-		check_mkdir(path);
+		file = fs.createWriteStream(fs_path);
+	}
 
-		fs.writeFileSync(path + fn + ".version", item.pkginfo["%VERSION%"]);
-		file = fs.createWriteStream(path + fn);
+	if(fs_mode && item)
+	{
+		if(!meta[item.name])
+		{
+			meta[item.name] = {};
+		}
+
+		meta[item.name][item.filename] = item.date;
 	}
 
 	for await (const chunk of rs)
@@ -210,8 +297,11 @@ const send_file_download = async (name, vars, item, is_sig, fs_mode, rs, res) =>
 			if(!fs_mode) return;
 
 			file.end();
-			fs.rmSync(path + fn);
+			fs.rmSync(fs_path);
+			
+			if(!item) return;
 
+			delete meta[item.name][item.filename];
 			return;
 		}
 		
@@ -227,8 +317,120 @@ const send_file_download = async (name, vars, item, is_sig, fs_mode, rs, res) =>
 	{
 		file.end();
 	}
+	
+	if(fs_mode && item)
+	{
+		fs.writeFileSync("db/" + name + "/" + vars + "/meta.json", JSON.stringify(meta));
+	}
 
 	res.send();
+}
+
+const pipe_to_client = (pipe, res) =>
+{
+	pipe.on("data", (chunk) =>
+	{
+		if(res.writable)
+		res.write(chunk);
+
+		else
+		pipe.destroy();
+	});
+
+	pipe.on("end", () =>
+	{
+		res.send();
+	});
+}
+
+const display_db = async (res, db, path, entrypoint, name, vars) =>
+{
+	let all = {};
+
+	all[entrypoint] = {
+		state: "Fresh",
+	};
+
+	for(const [pkgname, item] of Object.entries(db))
+	{
+		all[pkgname] = {
+			state: "Fresh",
+			mirror: item.mirror,
+		};
+		
+		all[pkgname + ".sig"] = {
+			state: "Fresh",
+			mirror: item.mirror,
+		};
+	}
+
+	const db_path = "db/" + name + "/" + vars;
+	
+	for(const pkgname of fs.existsSync(db_path) ? (await fs_p.readdir(db_path)) : [])
+	{
+		if(!all[pkgname])
+		{
+			all[pkgname] = {
+				state: "Stale",
+			};
+		}
+	}
+
+	let all_sorted = Object.entries(all).sort((a, b) => a[0].localeCompare(b[0]));
+	let rows = [];
+
+	for(let [pkgname, data] of all_sorted)
+	{
+		if(pkgname === "meta.json")
+		{
+			continue;
+		}
+
+		rows.push(`
+<tr>
+	<td><a href="/` + sanitize(name + "/" + path.join("/") + "/" + pkgname) + `">` + sanitize(pkgname) + `</a></td>
+	<td>` + sanitize(data.state) + `</td>
+	<td><a href="` + sanitize(data.mirror + path.join("/")) + `" target="_blank">` + sanitize(data.mirror) + `</a></td>
+</tr>
+`);
+	}
+
+	res.header("Content-Type", "text/html");
+	
+	res.send(`
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>Index of /` + sanitize(name + "/" + path.join("/")) + `</title>
+
+<style>
+
+td {
+	padding: 0 1.5em;
+}
+
+</style>
+
+</head>
+<body>
+
+<h1>Index of /` + sanitize(name + "/" + path.join("/")) + `</h1>
+
+<table>
+
+<tr>
+	<th>Filename</th>
+	<th>State</th>
+	<th>Mirror</th>
+</tr>
+
+` + rows.join("\n") + `
+</table>
+
+</body>
+</html>
+`);
 }
 
 /*
@@ -245,29 +447,29 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 	
 	path_t = path_t.split("/").filter(v => v);
 
-	console.log("will use " + name + " for " + JSON.stringify(path_t) + ", " + JSON.stringify(mirrors) + ", and " + entrypoint_t);
-	
 	let all_dbs = {};
+	let all_meta = {};
 	
-	app.use("/" + name, async (req, res) =>
+	app.use("/" + name, async (req, res, next) =>
 	{
 		if(req.method !== "GET")
 		{
-			res.status(400).send("Bad Method");
-			return;
+			return res.status(400).send("Bad Method");
 		}
 
 		let path = req.path.split("/").filter(v => v);
 		let vars = {};
 
-		if(path.length - 1 !== path_t.length)
+		if(path.length - 1 !== path_t.length && path.length !== path_t.length)
 		{
-			res.status(404).send("Not Found");
-			return;
+			return next();
+		}
+
+		if(path[path_t.length] === "meta.json")
+		{
+			return next();
 		}
 		
-		let filename = path[path_t.length];
-
 		for(let i = 0; i < path_t.length; i++)
 		{
 			let e = path_t[i];
@@ -277,7 +479,6 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 			vars[e.substr(1)] = path[i];
 		}
 
-		let path_db = Array.from(path);
 		let vars_u = new URLSearchParams(vars);
 		let entrypoint = entrypoint_t;
 
@@ -287,62 +488,48 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 			entrypoint = entrypoint.replaceAll("$" + k, v);
 		}
 		
-		path_db[path_t.length] = entrypoint;
 		vars = vars_u.toString();
 
-		const db = await get_dbs(all_dbs, vars, name, path_db, mirrors);
-		const is_partial = req.headers.range && req.headers.range.length > 0;
-		const is_sig = filename.endsWith(".sig");
+		const path_db = path.slice(0, path_t.length).concat(entrypoint);
+		const db = await get_dbs(all_dbs, all_meta, vars, name, path_db, mirrors);
 
-		if(is_sig)
+		if(!db)
 		{
-			filename = filename.substr(0, filename.length - 4);
+			return next();
 		}
 
-		else if(filename === entrypoint)
+		if(path.length === path_t.length)
+		{
+			return display_db(res, db, path, entrypoint, name, vars);
+		}
+
+		const filename = path[path_t.length];
+		const is_partial = req.headers.range && req.headers.range.length > 0;
+		const filename_trimmed = filename.endsWith(".sig") ? filename.substr(0, filename.length - 4) : filename;
+
+		if(filename === entrypoint)
 		{
 			let pack = tar.pack();
 
 			res.header("Content-Type", "application/x-tar");
-
-			pack.on("data", (chunk) =>
-			{
-				if(res.writable)
-				res.write(chunk);
-
-				else
-				pack.destroy();
-			});
-
-			pack.on("end", () =>
-			{
-				res.send();
-			});
 			
+			pipe_to_client(pack, res);
 			await create_db(db, pack);
 			pack.finalize();
 
 			return;
 		}
 
-		const item = db[filename];
-
-		if(!item)
-		{
-			res.status(404).send("Not Found");
-			return;
-		}
-
-		const fs_path = "db/" + name + "/" + vars + "/" + item.name;
-		const fs_fn = is_sig ? "/sig" : "/blob";
+		const item = db[filename_trimmed];
+		const fs_path = "db/" + name + "/" + vars + "/" + path[path.length - 1];
 
 		let rs;
 		let fs_mode;
 		
-		if(fs.existsSync(fs_path + fs_fn) && fs.existsSync(fs_path + fs_fn + ".version") && fs.readFileSync(fs_path + fs_fn + ".version").toString() === item.pkginfo["%VERSION%"])
+		if(fs.existsSync(fs_path))
 		{
 			let config = parse_client_range(req.headers.range);
-			let stat = fs.statSync(fs_path + fs_fn);
+			let stat = fs.statSync(fs_path);
 			let start = config.start;
 			let end = config.end;
 
@@ -351,7 +538,7 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 			if(start !== 0 || end < stat.size) res.status(206);
 
 			fs_mode = false;
-			rs = fs.createReadStream(fs_path + fs_fn, config);
+			rs = fs.createReadStream(fs_path, config);
 			console.log("HIT /" + name + "/" + path.join("/"));
 
 			res.header("Accept-Ranges", "bytes");
@@ -360,6 +547,11 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 
 			if(is_partial) 
 			res.header("Content-Range", "bytes " + start + "-" + end + "/" + stat.size);
+		}
+		
+		else if(!item)
+		{
+			return next();
 		}
 
 		else
@@ -382,9 +574,9 @@ const repo = (name, path_t, mirrors, entrypoint_t) =>
 			rs = file_req.body;
 		}
 
-		await send_file_download(name, vars, item, is_sig, fs_mode, rs, res);
+		await send_file_download(all_meta[vars], item, name, vars, fs_path, fs_mode, rs, res);
 	});
-};
+}
 
 check_mkdir("db");
 

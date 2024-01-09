@@ -10,4 +10,6 @@ mirrors:
     - http://ftp.swin.edu.au/$name/
     - http://mirror.internode.on.net/pub/$name/
     - http://ftp.iinet.net.au/pub/$name/
+    - http://archlinux.mirror.digitalpacific.com.au/
+    - http://syd.mirror.rackspace.com/$name/
 
