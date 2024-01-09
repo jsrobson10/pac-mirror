@@ -374,6 +374,11 @@ const display_db = async (res, db, path, entrypoint, name, vars) =>
 				state: "Stale",
 			};
 		}
+
+		else
+		{
+			all[pkgname].state = "Cached";
+		}
 	}
 
 	let all_sorted = Object.entries(all).sort((a, b) => a[0].localeCompare(b[0]));
@@ -390,7 +395,7 @@ const display_db = async (res, db, path, entrypoint, name, vars) =>
 <tr>
 	<td><a href="/` + sanitize(name + "/" + path.join("/") + "/" + pkgname) + `">` + sanitize(pkgname) + `</a></td>
 	<td>` + sanitize(data.state) + `</td>
-	<td><a href="` + sanitize(data.mirror + path.join("/")) + `" target="_blank">` + sanitize(data.mirror + path.join("/")) + `</a></td>
+	<td>` + (data.mirror ? (`<a href="` + sanitize(data.mirror + path.join("/")) + `" target="_blank">` + sanitize(data.mirror + path.join("/")) + `</a>`) : ``) + `</td>
 </tr>
 `);
 	}
