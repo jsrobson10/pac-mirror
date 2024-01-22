@@ -116,12 +116,12 @@ const cleanup_db_pkg = async (files, pkgs, path) =>
 
 	for(let i = keep; i < pkgs.length; i++)
 	{
-		const path_rm = path + "/" + pkgs[0];
+		const path_rm = path + "/" + pkgs[i][0];
 		
 		console.log("DELETE " + path_rm);
 
-		delete files[pkgs[0]];
-		await fs_p.rm(path + "/" + pkgs[0]);
+		delete files[pkgs[i]];
+		await fs_p.rm(path_rm);
 	}
 }
 
@@ -144,9 +144,8 @@ const cleanup_dbs = async (meta, db, name, vars) =>
 		pkgs_sig.sort(cmp);
 		pkgs_blob.sort(cmp);
 
-		const pkgpath = path + "/" + pkgid;
-		await cleanup_db_pkg(files, pkgs_sig, pkgpath);
-		await cleanup_db_pkg(files, pkgs_blob, pkgpath);
+		await cleanup_db_pkg(files, pkgs_sig, path);
+		await cleanup_db_pkg(files, pkgs_blob, path);
 	}
 
 	if(Object.keys(meta).length > 0 || fs.existsSync(path))
