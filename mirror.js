@@ -121,7 +121,11 @@ const cleanup_db_pkg = async (files, pkgs, path) =>
 		console.log("DELETE " + path_rm);
 
 		delete files[pkgs[i]];
-		await fs_p.rm(path_rm);
+
+		try { await fs_p.rm(path_rm); } catch(e)
+		{
+			console.log("DELETE FAIL " + path_rm);
+		}
 	}
 }
 
@@ -130,7 +134,7 @@ const cleanup_dbs = async (meta, db, name, vars) =>
 	const path = "db/" + name + "/" + vars;
 	const cmp = (a, b) => a[1] - b[1];
 
-	for(const [pkgid, files] of Object.entries(meta))
+	for(let [pkgid, files] of Object.entries(meta))
 	{
 		let pkgs_sig = [];
 		let pkgs_blob = [];
